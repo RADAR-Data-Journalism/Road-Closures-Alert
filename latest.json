@@ -1,0 +1,23 @@
+{
+  "cache_last_updated": null,
+  "cache_url": null,
+  "created": "2025-11-03T10:40:44.571265",
+  "datafile-date": "2025-11-03",
+  "description": null,
+  "format": "XML",
+  "hash": "",
+  "id": "00742307-4b30-4996-b1e1-da8f506339c0",
+  "last_modified": null,
+  "metadata_modified": "2025-11-03T10:40:44.169093",
+  "mimetype": "application/xml",
+  "mimetype_inner": null,
+  "name": "National Highways road network - 3 November 2025",
+  "package_id": "5b3267d8-4307-4eef-a9af-3a4c28224694",
+  "position": 712,
+  "resource-type": "data-link",
+  "resource_type": null,
+  "size": null,
+  "state": "active",
+  "url": "https://s3.eu-west-2.amazonaws.com/webdata.nationalhighways.co.uk/ha-roadworks/nh_roadworks_2025_03_11.xml",
+  "url_type": null
+}
