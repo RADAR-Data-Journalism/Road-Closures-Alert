@@ -1,0 +1,117 @@
+name: National Highways Roadworks Watch
+
+on:
+  # Check every 30 minutes on Mondays (UTC). Times vary, so poll frequently.
+  schedule:
+    - cron: "*/30 * * * 1"
+  workflow_dispatch: {}  # allow manual runs
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      DATASET_SLUG: highways_agency_planned_roadworks
+      STATE_FILE: .nh_latest.json
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Fetch latest resource metadata from data.gov.uk
+        id: fetch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Primary CKAN Action API (v3 path); fallback to generic path if needed.
+          API_PRIMARY="https://data.gov.uk/api/3/action/package_show?id=$DATASET_SLUG"
+          API_FALLBACK_URL="https://data.gov.uk/api/action/package_show"
+          # Try GET first, then POST fallback (CKAN supports both)
+          PKG_JSON="$(curl -fsSL "$API_PRIMARY" || curl -fsSL -X POST "$API_FALLBACK_URL" \
+                       -H "Content-Type: application/json" -d "{\"id\":\"$DATASET_SLUG\"}")"
+
+          # Pick newest XML resource by created/modified/name
+          echo "$PKG_JSON" > package.json
+          LATEST="$(jq -r '
+            .result.resources
+            | map(select((.format // "") | ascii_downcase == "xml"))
+            | sort_by(.created // .metadata_modified // .last_modified // .name)
+            | last
+          ' package.json)"
+
+          test -n "$LATEST" || { echo "No XML resources found" >&2; exit 1; }
+
+          jq -r '.' <<<"$LATEST" > latest.json
+          URL="$(jq -r '.url' latest.json)"
+          NAME="$(jq -r '.name' latest.json)"
+          CREATED="$(jq -r '.created // .metadata_modified // .last_modified // empty' latest.json)"
+
+          # Sanity: ensure the file is reachable
+          curl -fsI "$URL" >/dev/null || { echo "Latest URL not reachable: $URL" >&2; exit 1; }
+
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "created=$CREATED" >> "$GITHUB_OUTPUT"
+
+      - name: Detect change vs last seen
+        id: diff
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f "$STATE_FILE" ]; then
+            OLD_URL="$(jq -r '.url' "$STATE_FILE")"
+          else
+            OLD_URL=""
+          fi
+          NEW_URL='${{ steps.fetch.outputs.url }}'
+
+          if [ -n "$NEW_URL" ] && [ "$NEW_URL" != "$OLD_URL" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            jq -n \
+              --arg url    "${{ steps.fetch.outputs.url }}" \
+              --arg name   "${{ steps.fetch.outputs.name }}" \
+              --arg created"${{ steps.fetch.outputs.created }}" \
+              --arg checked_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+              '{url:$url, name:$name, created:$created, checked_at:$checked_at}' > "$STATE_FILE"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Post Slack alert
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "$SLACK_WEBHOOK_URL" ] || { echo "Missing SLACK_WEBHOOK_URL secret" >&2; exit 1; }
+
+          NAME='${{ steps.fetch.outputs.name }}'
+          URL='${{ steps.fetch.outputs.url }}'
+          CREATED='${{ steps.fetch.outputs.created }}'
+          TEXT=":traffic_light: National Highways planned roadworks updated\n*${NAME}*\n<${URL}|Download XML>\n_created: ${CREATED}_"
+
+          jq -n --arg text "$TEXT" '{text:$text}' \
+            | curl -fsS -X POST -H 'Content-Type: application/json' --data @- "$SLACK_WEBHOOK_URL"
+
+      - name: Commit state (so we remember next run)
+        if: steps.diff.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "$STATE_FILE" latest.json package.json || true
+          git commit -m "NH roadworks: update -> ${{ steps.fetch.outputs.name }}" || exit 0
+          git push
+
+      - name: Workflow summary
+        run: |
+          if [ "${{ steps.diff.outputs.changed }}" = "true" ]; then
+            echo "✅ New file detected and Slack notified: **${{ steps.fetch.outputs.name }}**" >> $GITHUB_STEP_SUMMARY
+            echo "<${{ steps.fetch.outputs.url }}|Download XML>" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "ℹ️ No change detected." >> $GITHUB_STEP_SUMMARY
+          fi
