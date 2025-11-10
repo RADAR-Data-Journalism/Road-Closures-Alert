@@ -2,13 +2,13 @@ name: National Highways Roadworks Watch
 
 on:
   push:
-    branches: [ main, master ]    # ensures the workflow appears right after you commit
+    branches: [ main, master ]
   schedule:
     - cron: "*/30 * * * 1"        # poll every 30 min on Mondays (UTC)
-  workflow_dispatch: {}            # “Run workflow” button
+  workflow_dispatch: {}
 
 permissions:
-  contents: write                  # needed for committing .nh_latest.json
+  contents: write
 
 jobs:
   check:
@@ -16,6 +16,7 @@ jobs:
     env:
       DATASET_SLUG: highways_agency_planned_roadworks
       STATE_FILE: .nh_latest.json
+      DATASET_PAGE_URL: "https://www.data.gov.uk/dataset/5b3267d8-4307-4eef-a9af-3a4c28224694/highways_agency_planned_roadworks"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -33,6 +34,7 @@ jobs:
           PKG_JSON="$(curl -fsSL "$API_PRIMARY" || curl -fsSL -X POST "$API_FALLBACK_URL" \
                        -H "Content-Type: application/json" -d "{\"id\":\"$DATASET_SLUG\"}")"
           echo "$PKG_JSON" > package.json
+
           LATEST="$(jq -r '
             .result.resources
             | map(select((.format // "") | ascii_downcase == "xml"))
@@ -40,11 +42,14 @@ jobs:
             | last
           ' package.json)"
           test -n "$LATEST" || { echo "No XML resources found" >&2; exit 1; }
+
           jq -r '.' <<<"$LATEST" > latest.json
           URL="$(jq -r '.url' latest.json)"
           NAME="$(jq -r '.name' latest.json)"
           CREATED="$(jq -r '.created // .metadata_modified // .last_modified // empty' latest.json)"
+
           curl -fsI "$URL" >/dev/null || { echo "Latest URL not reachable: $URL" >&2; exit 1; }
+
           echo "url=$URL" >> "$GITHUB_OUTPUT"
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
           echo "created=$CREATED" >> "$GITHUB_OUTPUT"
@@ -60,19 +65,20 @@ jobs:
             OLD_URL=""
           fi
           NEW_URL='${{ steps.fetch.outputs.url }}'
+
           if [ -n "$NEW_URL" ] && [ "$NEW_URL" != "$OLD_URL" ]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
             jq -n \
-              --arg url       "${{ steps.fetch.outputs.url }}" \
-              --arg name      "${{ steps.fetch.outputs.name }}" \
-              --arg created   "${{ steps.fetch.outputs.created }}" \
+              --arg url        "${{ steps.fetch.outputs.url }}" \
+              --arg name       "${{ steps.fetch.outputs.name }}" \
+              --arg created    "${{ steps.fetch.outputs.created }}" \
               --arg checked_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
               '{url:$url, name:$name, created:$created, checked_at:$checked_at}' > "$STATE_FILE"
           else
             echo "changed=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Post Slack alert
+      - name: Post Slack alert (simple one-liner)
         if: steps.diff.outputs.changed == 'true'
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
@@ -80,12 +86,31 @@ jobs:
         run: |
           set -euo pipefail
           [ -n "$SLACK_WEBHOOK_URL" ] || { echo "Missing SLACK_WEBHOOK_URL secret" >&2; exit 1; }
-          NAME='${{ steps.fetch.outputs.name }}'
-          URL='${{ steps.fetch.outputs.url }}'
-          CREATED='${{ steps.fetch.outputs.created }}'
-          TEXT=":traffic_light: National Highways planned roadworks updated\n*${NAME}*\n<${URL}|Download XML>\n_created: ${CREATED}_"
-          jq -n --arg text "$TEXT" '{text:$text}' \
+
+          TEXT=":traffic_light: New road closures data is available at the following link: $DATASET_PAGE_URL"
+          # Keep it plain—no newlines or markdown so it won’t look garbled.
+          jq -n --arg text "$TEXT" --argjson u false '{text:$text, unfurl_links:$u, unfurl_media:$u}' \
             | curl -fsS -X POST -H 'Content-Type: application/json' --data @- "$SLACK_WEBHOOK_URL"
+
+      # --- Optional: prettier card style (uncomment to use instead of the simple one-liner) ---
+      # - name: Post Slack alert (Block Kit)
+      #   if: steps.diff.outputs.changed == 'true'
+      #   env:
+      #     SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      #   shell: bash
+      #   run: |
+      #     set -euo pipefail
+      #     [ -n "$SLACK_WEBHOOK_URL" ] || { echo "Missing SLACK_WEBHOOK_URL secret" >&2; exit 1; }
+      #     NAME='${{ steps.fetch.outputs.name }}'
+      #     jq -n --arg url "$DATASET_PAGE_URL" --arg name "$NAME" '
+      #       {
+      #         text: ":traffic_light: New National Highways roadworks data available",
+      #         blocks: [
+      #           { "type": "section", "text": { "type": "mrkdwn", "text": ":traffic_light: *New National Highways roadworks data available*" } },
+      #           { "type": "section", "text": { "type": "mrkdwn", "text": "<\($url)|Open dataset page>" } },
+      #           { "type": "context", "elements": [ { "type": "mrkdwn", "text": "*Latest file:* \($name)" } ] }
+      #         ]
+      #       }' | curl -fsS -X POST -H 'Content-Type: application/json' --data @- "$SLACK_WEBHOOK_URL"
 
       - name: Commit state (so we remember next run)
         if: steps.diff.outputs.changed == 'true'
@@ -102,7 +127,7 @@ jobs:
         run: |
           if [ "${{ steps.diff.outputs.changed }}" = "true" ]; then
             echo "✅ New file detected and Slack notified: **${{ steps.fetch.outputs.name }}**" >> $GITHUB_STEP_SUMMARY
-            echo "<${{ steps.fetch.outputs.url }}|Download XML>" >> $GITHUB_STEP_SUMMARY
+            echo "<${{ env.DATASET_PAGE_URL }}|Dataset page>" >> $GITHUB_STEP_SUMMARY
           else
             echo "ℹ️ No change detected." >> $GITHUB_STEP_SUMMARY
           fi
